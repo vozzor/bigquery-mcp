@@ -1,28 +1,68 @@
-# BigQuery MCP Server - Migração de Datasets
+# BigQuery MCP Server
 
-MCP Server para auxiliar na migração das consultas SQL de um dataset antigo (`dataset_antigo`) para um novo (`dataset_novo`) no Google BigQuery.
+Servidor MCP (Model Context Protocol) que expõe ferramentas de consulta e análise do Google BigQuery para assistentes de IA como Claude, Gemini e Cursor. Permite que o assistente navegue pelo schema, execute queries e compare datasets sem sair da conversa.
 
-## Ferramentas Disponíveis
+> **MCP (Model Context Protocol)** é o padrão aberto da Anthropic para conectar modelos de linguagem a fontes de dados e ferramentas externas. Com um servidor MCP rodando, o assistente de IA pode chamar as ferramentas diretamente durante a conversa.
 
-| Ferramenta | Descrição |
+## Ferramentas disponíveis
+
+| Ferramenta | O que faz |
 |------------|-----------|
-| `run_query` | Executa consultas SELECT no BigQuery |
-| `list_tables` | Lista tabelas de um ou ambos datasets |
-| `get_schema` | Retorna schema completo de uma tabela |
-| `compare_schemas` | Compara schemas entre datasets antigo e novo |
-| `sample_data` | Retorna amostra de dados de uma tabela |
-| `sample_json_field` | Analisa estrutura de campos JSON |
+| `run_query` | Executa SELECT no BigQuery com suporte a `dry_run` e limite de linhas |
+| `list_tables` | Lista tabelas de um ou ambos os datasets |
+| `get_schema` | Schema completo de uma tabela: tipos, modos, total de linhas e tamanho |
+| `compare_schemas` | Diff entre dois datasets — colunas adicionadas, removidas e com tipo alterado |
+| `sample_data` | Amostra de N linhas de qualquer tabela |
+| `sample_json_field` | Inspeciona a estrutura de campos JSON/STRING que guardam objetos |
+
+## Exemplo de uso
+
+Com o servidor configurado, você pode perguntar ao assistente de IA:
+
+```
+Você: quais tabelas existem no dataset novo?
+
+IA: [chama list_tables] Encontrei 12 tabelas: pedidos, clientes,
+    produtos, estoque...
+
+Você: compare o schema da tabela pedidos entre os dois datasets
+
+IA: [chama compare_schemas] A tabela pedidos tem 3 diferenças:
+    - coluna "status_pagamento" adicionada (STRING)
+    - coluna "dt_entrega" removida
+    - coluna "valor" mudou de FLOAT para NUMERIC
+
+Você: mostre 5 linhas de pedidos no dataset novo
+
+IA: [chama sample_data] ...
+```
 
 ## Instalação
 
 ```bash
-cd bigquery-mcp
 pip install -r requirements.txt
 ```
 
-## Configuração no Gemini Code Assist
+## Configuração
 
-Adicione ao arquivo de configuração MCP (`settings.json` ou similar):
+Crie um arquivo `.env` a partir do exemplo:
+
+```bash
+cp .env.example .env   # se existir, ou defina as variáveis manualmente
+```
+
+Variáveis necessárias:
+
+```env
+GOOGLE_APPLICATION_CREDENTIALS=/caminho/para/service-account.json
+BQ_PROJECT_ID=seu-projeto-gcp
+```
+
+> O arquivo `service-account.json` deve ter permissão `bigquery.dataViewer` no projeto. **Nunca commite esse arquivo** — ele já está no `.gitignore`.
+
+## Configuração no Claude Desktop / Gemini Code Assist
+
+Adicione ao arquivo de configuração MCP do seu assistente:
 
 ```json
 {
@@ -30,16 +70,25 @@ Adicione ao arquivo de configuração MCP (`settings.json` ou similar):
     "bigquery": {
       "command": "python",
       "args": ["./server.py"],
-      "cwd": "/path/to/bigquery-mcp"
+      "cwd": "/caminho/para/bigquery-mcp"
     }
   }
 }
 ```
 
-## Uso
+## Testar a conexão
 
-Após configurado, as ferramentas estarão disponíveis para:
-- Listar e comparar schemas
-- Executar consultas com limite e dry_run
-- Analisar campos JSON
-- Migrar queries para o novo formato
+```bash
+python test_connection.py
+```
+
+Verifica credenciais, conexão com o projeto e lista as tabelas do dataset configurado.
+
+## Stack
+
+| | |
+|--|--|
+| Protocolo | MCP (Model Context Protocol) via `fastmcp` |
+| Dados | Google BigQuery |
+| Auth | Service Account (google-auth) |
+| Runtime | Python 3.10+ |
