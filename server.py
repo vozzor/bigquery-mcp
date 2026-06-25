@@ -5,7 +5,8 @@ Permite executar consultas SQL no BigQuery via Model Context Protocol
 
 import json
 import os
-from typing import Any
+import re
+from functools import lru_cache
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from mcp.server.fastmcp import FastMCP
@@ -16,15 +17,36 @@ PROJECT_ID = os.environ.get("BQ_PROJECT_ID", "meu-projeto")
 DEFAULT_DATASET_OLD = "dataset_antigo"
 DEFAULT_DATASET_NEW = "dataset_novo"
 
-# Inicializa credenciais e cliente BigQuery
-credentials = service_account.Credentials.from_service_account_file(
-    CREDENTIALS_PATH,
-    scopes=["https://www.googleapis.com/auth/bigquery.readonly"]
-)
-bq_client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
+# Padrão de identificador BigQuery válido (datasets, tabelas e colunas).
+# Usado para barrar SQL injection nas tools que interpolam identificadores.
+IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+@lru_cache(maxsize=1)
+def get_client() -> bigquery.Client:
+    """Inicializa (lazy) e mantém em cache o cliente BigQuery.
+
+    A inicialização é adiada para evitar quebrar `import server` quando o
+    arquivo de credenciais não está presente (testes, lint, CI).
+    """
+    credentials = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_PATH,
+        scopes=["https://www.googleapis.com/auth/bigquery.readonly"]
+    )
+    return bigquery.Client(credentials=credentials, project=PROJECT_ID)
+
 
 # Inicializa o servidor MCP
 mcp = FastMCP("BigQuery MCP Server")
+
+
+def _validate_identifier(value: str, label: str) -> None:
+    """Valida um identificador SQL; lança ValueError se for inválido."""
+    if not value or not IDENTIFIER_RE.match(value):
+        raise ValueError(
+            f"{label} inválido: '{value}'. "
+            "Use apenas letras, números e underscore (^[A-Za-z0-9_]+$)."
+        )
 
 
 def format_results(rows, max_rows: int = 100) -> list[dict]:
@@ -60,8 +82,8 @@ def run_query(sql: str, dry_run: bool = False, max_rows: int = 100) -> str:
     
     try:
         job_config = bigquery.QueryJobConfig(dry_run=dry_run, use_query_cache=True)
-        query_job = bq_client.query(sql, job_config=job_config)
-        
+        query_job = get_client().query(sql, job_config=job_config)
+
         if dry_run:
             bytes_processed = query_job.total_bytes_processed
             return json.dumps({
@@ -70,10 +92,11 @@ def run_query(sql: str, dry_run: bool = False, max_rows: int = 100) -> str:
                 "bytes_processed_readable": f"{bytes_processed / (1024*1024):.2f} MB",
                 "query_valid": True
             }, indent=2)
-        
-        results = format_results(query_job.result(), max_rows)
-        total_rows = query_job.result().total_rows
-        
+
+        result = query_job.result()
+        results = format_results(result, max_rows)
+        total_rows = result.total_rows
+
         return json.dumps({
             "rows_returned": len(results),
             "total_rows": total_rows,
@@ -100,9 +123,10 @@ def list_tables(dataset: str = None) -> str:
         datasets_to_list = [dataset] if dataset else [DEFAULT_DATASET_OLD, DEFAULT_DATASET_NEW]
         all_tables = {}
         
+        client = get_client()
         for ds in datasets_to_list:
-            dataset_ref = bq_client.dataset(ds)
-            tables = list(bq_client.list_tables(dataset_ref))
+            dataset_ref = client.dataset(ds)
+            tables = list(client.list_tables(dataset_ref))
             all_tables[ds] = [
                 {
                     "table_id": t.table_id,
@@ -132,11 +156,12 @@ def get_schema(table_name: str, dataset: str = None) -> str:
     """
     try:
         datasets_to_check = [dataset] if dataset else [DEFAULT_DATASET_NEW, DEFAULT_DATASET_OLD]
-        
+        client = get_client()
+
         for ds in datasets_to_check:
             try:
-                table_ref = bq_client.dataset(ds).table(table_name)
-                table = bq_client.get_table(table_ref)
+                table_ref = client.dataset(ds).table(table_name)
+                table = client.get_table(table_ref)
                 
                 schema = [
                     {
@@ -178,20 +203,22 @@ def compare_schemas(table_name: str) -> str:
         Diff mostrando colunas adicionadas, removidas e alteradas
     """
     try:
+        client = get_client()
+
         # Busca schema do dataset antigo
         old_schema = {}
         try:
-            table_ref = bq_client.dataset(DEFAULT_DATASET_OLD).table(table_name)
-            table = bq_client.get_table(table_ref)
+            table_ref = client.dataset(DEFAULT_DATASET_OLD).table(table_name)
+            table = client.get_table(table_ref)
             old_schema = {f.name: {"type": f.field_type, "mode": f.mode} for f in table.schema}
         except Exception:
             pass
-        
+
         # Busca schema do dataset novo
         new_schema = {}
         try:
-            table_ref = bq_client.dataset(DEFAULT_DATASET_NEW).table(table_name)
-            table = bq_client.get_table(table_ref)
+            table_ref = client.dataset(DEFAULT_DATASET_NEW).table(table_name)
+            table = client.get_table(table_ref)
             new_schema = {f.name: {"type": f.field_type, "mode": f.mode} for f in table.schema}
         except Exception:
             pass
@@ -265,7 +292,13 @@ def sample_data(table_name: str, dataset: str = None, limit: int = 5) -> str:
     """
     ds = dataset or DEFAULT_DATASET_NEW
     limit = min(limit, 20)
-    
+
+    try:
+        _validate_identifier(ds, "dataset")
+        _validate_identifier(table_name, "table_name")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+
     sql = f"SELECT * FROM `{PROJECT_ID}.{ds}.{table_name}` LIMIT {limit}"
     return run_query(sql, max_rows=limit)
 
@@ -286,7 +319,14 @@ def sample_json_field(table_name: str, json_column: str, dataset: str = None, li
     """
     ds = dataset or DEFAULT_DATASET_NEW
     limit = min(limit, 10)
-    
+
+    try:
+        _validate_identifier(ds, "dataset")
+        _validate_identifier(table_name, "table_name")
+        _validate_identifier(json_column, "json_column")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+
     sql = f"""
     SELECT
         {json_column}

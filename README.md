@@ -58,7 +58,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/caminho/para/service-account.json
 BQ_PROJECT_ID=seu-projeto-gcp
 ```
 
-> O arquivo `service-account.json` deve ter permissão `bigquery.dataViewer` no projeto. **Nunca commite esse arquivo** — ele já está no `.gitignore`.
+> A Service Account precisa da role IAM `roles/bigquery.dataViewer` (leitura de dados e metadados) no projeto. Além disso, o servidor restringe o acesso no nível do OAuth ao escopo `bigquery.readonly`, então mesmo que a role concedida seja mais ampla, nenhuma operação de escrita é possível. **Nunca commite o `service-account.json`** — ele já está no `.gitignore`.
 
 ## Configuração no Claude Desktop / Gemini Code Assist
 
